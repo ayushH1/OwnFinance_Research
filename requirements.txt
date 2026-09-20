@@ -1,8 +1,5 @@
-streamlit
-google-genai
-yfinance
-duckduckgo-search
-pandas
-numpy
-plotly
-markdown-pdf
+streamlit>=1.35.0
+google-genai>=0.1.1
+yfinance>=0.2.40
+pandas>=2.0.0
+plotly>=5.18.0
