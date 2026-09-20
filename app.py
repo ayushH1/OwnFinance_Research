@@ -19,7 +19,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for Terminal Styling
 st.markdown("""
     <style>
         .main {
@@ -53,7 +52,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. CLIENT & SECRETS INITIALIZATION
+# 2. CLIENT INITIALIZATION
 # ==========================================
 @st.cache_resource
 def get_genai_client():
@@ -66,25 +65,36 @@ def get_genai_client():
 client = get_genai_client()
 
 # ==========================================
-# 3. DATA ENGINE (yfinance Integration)
+# 3. FIXED DATA ENGINE (No Ticker Object Caching)
 # ==========================================
 @st.cache_data(ttl=300)
 def fetch_financial_data(ticker_symbol: str, period: str = "1y"):
-    """Fetches market price, historical candles, key metrics, and financial statements."""
+    """
+    Fetches market price, historical candles, key metrics, and financial statements.
+    Returns strictly serializable DataFrames and Dicts to prevent caching errors.
+    """
     try:
         stock = yf.Ticker(ticker_symbol)
-        hist = stock.history(period=period)
-        info = stock.info
         
-        # Pull financials safely
+        # Pull raw serializable data
+        hist = stock.history(period=period)
+        info = stock.info if isinstance(stock.info, dict) else {}
+        
+        # Financial statements as pure DataFrames
+        inc = stock.financials if isinstance(stock.financials, pd.DataFrame) else pd.DataFrame()
+        bal = stock.balance_sheet if isinstance(stock.balance_sheet, pd.DataFrame) else pd.DataFrame()
+        cf = stock.cashflow if isinstance(stock.cashflow, pd.DataFrame) else pd.DataFrame()
+
         financials = {
-            "income": stock.financials,
-            "balance": stock.balance_sheet,
-            "cashflow": stock.cashflow
+            "income": inc,
+            "balance": bal,
+            "cashflow": cf
         }
-        return stock, hist, info, financials
+        
+        # DO NOT return the yf.Ticker object 'stock' directly
+        return hist, info, financials
     except Exception as e:
-        return None, None, None, None
+        return None, None, None
 
 # ==========================================
 # 4. RESILIENT AI SYNTHESIS ENGINE
@@ -170,9 +180,9 @@ st.sidebar.markdown("""
 
 if run_button:
     with st.spinner(f"Ingesting exchange metrics and web data for {ticker_input}..."):
-        stock, hist, info, financials = fetch_financial_data(ticker_input, period=time_frame)
+        hist, info, financials = fetch_financial_data(ticker_input, period=time_frame)
 
-    if stock is not None and hist is not None and not hist.empty:
+    if hist is not None and not hist.empty:
         comp_name = info.get('longName', ticker_input)
         currency = info.get('currency', 'USD')
         
@@ -196,7 +206,7 @@ if run_button:
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # Main Workspace Navigation Tabs
+        # Workspace Navigation Tabs
         tab_chart, tab_ai, tab_financials, tab_profile = st.tabs([
             "📈 Interactive Chart & Volume", 
             "🧠 AI Research Memo", 
@@ -213,7 +223,6 @@ if run_button:
                 row_heights=[0.75, 0.25]
             )
             
-            # Candlestick
             fig.add_trace(go.Candlestick(
                 x=hist.index,
                 open=hist['Open'],
@@ -223,7 +232,6 @@ if run_button:
                 name="OHLC"
             ), row=1, col=1)
             
-            # Volume
             fig.add_trace(go.Bar(
                 x=hist.index,
                 y=hist['Volume'],
@@ -255,19 +263,19 @@ if run_button:
             st.subheader("Exchange Financial Statements")
             f_option = st.radio("Statement Type", ["Income Statement", "Balance Sheet", "Cash Flow"], horizontal=True)
             
-            if f_option == "Income Statement" and financials["income"] is not None:
+            if f_option == "Income Statement" and not financials["income"].empty:
                 st.dataframe(financials["income"], use_container_width=True)
-            elif f_option == "Balance Sheet" and financials["balance"] is not None:
+            elif f_option == "Balance Sheet" and not financials["balance"].empty:
                 st.dataframe(financials["balance"], use_container_width=True)
-            elif f_option == "Cash Flow" and financials["cashflow"] is not None:
+            elif f_option == "Cash Flow" and not financials["cashflow"].empty:
                 st.dataframe(financials["cashflow"], use_container_width=True)
             else:
-                st.info("Financial statements unavailable for this symbol.")
+                st.info("Financial statement metrics unavailable for this ticker.")
 
-        # TAB 4: Profile & Governance
+        # TAB 4: Profile
         with tab_profile:
             st.subheader("Business Summary")
-            st.write(info.get('longBusinessSummary', 'No description available.'))
+            st.write(info.get('longBusinessSummary', 'No summary available.'))
             
             st.markdown("---")
             st.subheader("Key Corporate Metrics")
@@ -277,6 +285,6 @@ if run_button:
             p3.write(f"**Debt to Equity:** {info.get('debtToEquity', 'N/A')}")
 
     else:
-        st.error(f"Unable to retrieve data for ticker '{ticker_input}'. Please check the symbol syntax (e.g., use `.NS` suffix for NSE India stocks).")
+        st.error(f"Unable to retrieve market data for '{ticker_input}'. Please verify symbol syntax (e.g., use `.NS` suffix for NSE India stocks).")
 else:
-    st.info("Enter a stock symbol in the left control panel and select **EXECUTE RESEARCH PIPELINE**.")
+    st.info("Enter a ticker symbol in the sidebar and select **EXECUTE RESEARCH PIPELINE**.")
