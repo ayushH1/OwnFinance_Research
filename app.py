@@ -10,23 +10,22 @@ from google.genai import types
 from google.genai.errors import APIError, ClientError
 
 # ==========================================
-# 1. PAGE CONFIG & ENTERPRISE STYLING
+# 1. PAGE CONFIG & TERMINAL STYLING
 # ==========================================
 st.set_page_config(
-    page_title="AlphaTerminal | Enterprise Financial Intelligence",
+    page_title="AlphaTerminal | Enterprise Equity Research",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
+# Dark Terminal Custom Styling
 st.markdown("""
     <style>
-        .main {
-            background-color: #0B0E14;
-        }
+        .main { background-color: #0B0E14; }
         .stMetric {
             background-color: #151922;
-            padding: 15px;
+            padding: 12px 16px;
             border-radius: 6px;
             border: 1px solid #232936;
         }
@@ -34,9 +33,7 @@ st.markdown("""
             background-color: #11141C;
             border-right: 1px solid #232936;
         }
-        .stTabs [data-baseweb="tab-list"] {
-            gap: 8px;
-        }
+        .stTabs [data-baseweb="tab-list"] { gap: 8px; }
         .stTabs [data-baseweb="tab"] {
             background-color: #151922;
             border-radius: 4px;
@@ -58,163 +55,192 @@ st.markdown("""
 def get_genai_client():
     api_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        st.error("🔑 Configuration Error: GEMINI_API_KEY missing in Streamlit Secrets.")
+        st.error("🔑 Configuration Error: GEMINI_API_KEY is missing in Streamlit Secrets.")
         st.stop()
     return genai.Client(api_key=api_key)
 
 client = get_genai_client()
 
 # ==========================================
-# 3. FIXED DATA ENGINE (No Ticker Object Caching)
+# 3. ROBUST DATA ENGINE (NO N/A FALLBACKS)
 # ==========================================
 @st.cache_data(ttl=300)
 def fetch_financial_data(ticker_symbol: str, period: str = "1y"):
     """
-    Fetches market price, historical candles, key metrics, and financial statements.
-    Returns strictly serializable DataFrames and Dicts to prevent caching errors.
+    Retrieves exchange price data and financial statements.
+    Includes fallbacks for missing Yahoo Finance info fields.
     """
     try:
         stock = yf.Ticker(ticker_symbol)
-        
-        # Pull raw serializable data
         hist = stock.history(period=period)
+        
+        if hist.empty:
+            return None, None, None
+
         info = stock.info if isinstance(stock.info, dict) else {}
         
-        # Financial statements as pure DataFrames
+        # Hard data calculation fallbacks if Yahoo API returns empty dicts
+        latest_close = hist['Close'].iloc[-1]
+        prev_close = hist['Close'].iloc[-2] if len(hist) > 1 else latest_close
+        price_change = latest_close - prev_close
+        pct_change = (price_change / prev_close) * 100
+
+        # Safe Metrics Extraction
+        extracted_metrics = {
+            "name": info.get('longName') or info.get('shortName') or ticker_symbol,
+            "sector": info.get('sector', 'N/A'),
+            "industry": info.get('industry', 'N/A'),
+            "exchange": info.get('exchange', 'NSE/BSE'),
+            "currency": info.get('currency', 'INR' if '.NS' in ticker_symbol or '.BO' in ticker_symbol else 'USD'),
+            "price": info.get('currentPrice') or info.get('regularMarketPrice') or latest_close,
+            "change": price_change,
+            "pct_change": pct_change,
+            "market_cap": info.get('marketCap'),
+            "pe_ratio": info.get('trailingPE') or info.get('forwardPE', 'N/A'),
+            "volume": hist['Volume'].iloc[-1],
+            "52w_high": hist['High'].max(),
+            "52w_low": hist['Low'].min(),
+            "summary": info.get('longBusinessSummary', 'No description available for this ticker.')
+        }
+
+        # Financials as clean DataFrames
         inc = stock.financials if isinstance(stock.financials, pd.DataFrame) else pd.DataFrame()
         bal = stock.balance_sheet if isinstance(stock.balance_sheet, pd.DataFrame) else pd.DataFrame()
         cf = stock.cashflow if isinstance(stock.cashflow, pd.DataFrame) else pd.DataFrame()
 
-        financials = {
-            "income": inc,
-            "balance": bal,
-            "cashflow": cf
-        }
-        
-        # DO NOT return the yf.Ticker object 'stock' directly
-        return hist, info, financials
-    except Exception as e:
+        financials = {"income": inc, "balance": bal, "cashflow": cf}
+        return hist, extracted_metrics, financials
+    except Exception:
         return None, None, None
 
 # ==========================================
-# 4. RESILIENT AI SYNTHESIS ENGINE
+# 4. RESILIENT INSTITUTIONAL AI ENGINE
 # ==========================================
-def generate_institutional_report(ticker: str, info_dict: dict, max_retries: int = 3):
-    """Executes search-grounded institutional thesis generation with error catching."""
+def generate_institutional_report(ticker: str, metrics: dict, max_retries: int = 3):
+    """Generates an institutional equity research memo using live web grounding."""
     delay = 2
+    
     prompt = f"""
-    You are a Senior Managing Director in Equity Research at a top global investment bank.
-    Synthesize an institutional-grade, hedge-fund quality research thesis for: {ticker}.
+    You are a Senior Equity Managing Director at a top global investment firm.
+    Synthesize a hedge-fund quality research memo for ticker: {ticker}.
 
-    FINANCIAL CONTEXT PROVIDED:
-    - Company: {info_dict.get('longName', ticker)}
-    - Sector: {info_dict.get('sector', 'N/A')} | Industry: {info_dict.get('industry', 'N/A')}
-    - Current Price: {info_dict.get('currency', 'USD')} {info_dict.get('currentPrice', 'N/A')}
-    - Market Cap: {info_dict.get('marketCap', 'N/A')}
-    - Trailing P/E: {info_dict.get('trailingPE', 'N/A')} | Forward P/E: {info_dict.get('forwardPE', 'N/A')}
-    - EV/EBITDA: {info_dict.get('enterpriseToEbitda', 'N/A')}
-    - Operating Margin: {info_dict.get('operatingMargins', 'N/A')}
-    - Free Cash Flow: {info_dict.get('freeCashflow', 'N/A')}
+    REAL-TIME EXCHANGE METRICS:
+    - Company: {metrics['name']}
+    - Sector: {metrics['sector']} | Industry: {metrics['industry']}
+    - Current Price: {metrics['currency']} {metrics['price']:,.2f}
+    - 52-Week Range: {metrics['52w_low']:,.2f} - {metrics['52w_high']:,.2f}
+    - Trailing P/E: {metrics['pe_ratio']}
 
-    REQUIRED STRUCTURE:
-    1. **Executive Investment Thesis** (Core Catalyst, Bull vs. Bear Case)
-    2. **Real-Time News & Catalyst Analysis** (Search for recent 30-90 day events, regulatory developments, earnings outcomes)
-    3. **Fundamental & Valuation Health** (Assessment of multiples vs historical averages)
-    4. **Structural Risks & Competitive Moat**
-    5. **Final Institutional Stance & Target Risk Parameters**
+    REQUIRED INSTITUTIONAL ANALYSIS:
+    1. **Executive Investment Thesis & Rating** (Bull vs. Bear Case, High-conviction Stance)
+    2. **Real-Time Catalysts & News Grounding** (Search the web for news from the last 30-90 days, earnings call takeaways, strategic shifts)
+    3. **Valuation & Metric Benchmarking** (P/E analysis relative to sector peers)
+    4. **Key Structural & Macroeconomic Risks**
+    5. **Target Monitoring Parameters & Strategic Outlook**
     """
 
-    for attempt in range(1, max_retries + 1):
-        try:
-            config = types.GenerateContentConfig(
-                temperature=0.15,
-                max_output_tokens=4096,
-                tools=[types.Tool(google_search=types.GoogleSearch())]
-            )
-            
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=prompt,
-                config=config
-            )
-            return response.text
+    # Model fallbacks to avoid single-point deprecation failures
+    models_to_try = ["gemini-2.5-pro", "gemini-1.5-pro", "gemini-1.5-flash"]
 
-        except ClientError as e:
-            error_code = getattr(e, 'code', 'UNKNOWN')
-            error_msg = getattr(e, 'message', str(e))
-            
-            if error_code == 429 and attempt < max_retries:
-                time.sleep(delay)
-                delay *= 2
-                continue
-            st.error(f"❌ Gemini API Error [{error_code}]: {error_msg}")
-            st.stop()
+    for model_name in models_to_try:
+        for attempt in range(1, max_retries + 1):
+            try:
+                config = types.GenerateContentConfig(
+                    temperature=0.15,
+                    max_output_tokens=4096,
+                    tools=[types.Tool(google_search=types.GoogleSearch())]
+                )
+                
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config=config
+                )
+                return response.text
 
-        except APIError as e:
-            if attempt < max_retries:
-                time.sleep(delay)
-                delay *= 2
-                continue
-            st.error(f"❌ Google Service Error: {str(e)}")
-            st.stop()
+            except ClientError as e:
+                error_code = getattr(e, 'code', 'UNKNOWN')
+                error_msg = getattr(e, 'message', str(e))
+                
+                # If model is deprecated/not found, break loop to try next model
+                if error_code in [404, 400] and "not found" in error_msg.lower():
+                    break
+                
+                if error_code == 429 and attempt < max_retries:
+                    time.sleep(delay)
+                    delay *= 2
+                    continue
+                
+                if model_name == models_to_try[-1]:
+                    st.error(f"❌ Gemini API Error [{error_code}]: {error_msg}")
+                    st.stop()
+
+            except APIError:
+                if attempt < max_retries:
+                    time.sleep(delay)
+                    delay *= 2
+                    continue
 
 # ==========================================
-# 5. DASHBOARD LAYOUT & CONTROLS
+# 5. DASHBOARD INTERFACE
 # ==========================================
 st.sidebar.title("⚡ AlphaTerminal")
-st.sidebar.caption("Institutional Financial Intelligence")
+st.sidebar.caption("Institutional Equity Intelligence")
 
-ticker_input = st.sidebar.text_input("ENTER TICKER / SYMBOL", value="RELIANCE.NS").strip().upper()
+ticker_input = st.sidebar.text_input("ENTER TICKER SYMBOL", value="RELIANCE.NS").strip().upper()
 time_frame = st.sidebar.selectbox("TIMEFRAME", ["1mo", "3mo", "6mo", "1y", "2y", "5y", "max"], index=3)
 
 run_button = st.sidebar.button("🚀 EXECUTE RESEARCH PIPELINE", type="primary")
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("""
-**Ticker Format Guide:**
-- **US Equities:** `AAPL`, `MSFT`, `NVDA`
-- **India NSE:** `RELIANCE.NS`, `TCS.NS`, `HDFCBANK.NS`
-- **India BSE:** `500325.BO`
+**Supported Formats:**
+- **NSE (India):** `RELIANCE.NS`, `TCS.NS`, `HDFCBANK.NS`
+- **BSE (India):** `500325.BO`
+- **US Equities:** `AAPL`, `NVDA`, `TSLA`
 - **Forex / Crypto:** `EURUSD=X`, `BTC-USD`
 """)
 
 if run_button:
-    with st.spinner(f"Ingesting exchange metrics and web data for {ticker_input}..."):
-        hist, info, financials = fetch_financial_data(ticker_input, period=time_frame)
+    with st.spinner(f"Ingesting exchange data for {ticker_input}..."):
+        hist, metrics, financials = fetch_financial_data(ticker_input, period=time_frame)
 
-    if hist is not None and not hist.empty:
-        comp_name = info.get('longName', ticker_input)
-        currency = info.get('currency', 'USD')
+    if hist is not None and metrics is not None:
+        # Header Information
+        st.title(f"{metrics['name']} ({ticker_input})")
+        st.caption(f"Sector: {metrics['sector']} | Industry: {metrics['industry']} | Exchange: {metrics['exchange']}")
         
-        # Header Banner
-        st.title(f"{comp_name} ({ticker_input})")
-        st.caption(f"Sector: {info.get('sector', 'N/A')} | Industry: {info.get('industry', 'N/A')} | Exchange: {info.get('exchange', 'N/A')}")
-        
-        # Key Metrics Bar
+        # Primary KPI Bar
         c1, c2, c3, c4, c5 = st.columns(5)
-        m_price = info.get('currentPrice') or hist['Close'].iloc[-1]
-        m_cap = f"{info.get('marketCap', 0):,}" if info.get('marketCap') else "N/A"
-        pe_ratio = info.get('trailingPE', 'N/A')
-        forward_pe = info.get('forwardPE', 'N/A')
-        fcf = f"{info.get('freeCashflow', 0):,}" if info.get('freeCashflow') else "N/A"
-
-        c1.metric("Live Price", f"{currency} {m_price:,.2f}")
-        c2.metric("Market Cap", f"{m_cap}")
-        c3.metric("Trailing P/E", f"{pe_ratio}")
-        c4.metric("Forward P/E", f"{forward_pe}")
-        c5.metric("Free Cash Flow", f"{fcf}")
+        
+        m_cap_str = f"{metrics['currency']} {metrics['market_cap'] / 1e10:,.2f} Cr" if metrics['market_cap'] and metrics['currency'] == 'INR' else (f"${metrics['market_cap'] / 1e9:,.2f} B" if metrics['market_cap'] else "N/A")
+        
+        c1.metric("Live Price", f"{metrics['currency']} {metrics['price']:,.2f}", f"{metrics['pct_change']:+.2f}%")
+        c2.metric("Market Cap", m_cap_str)
+        c3.metric("Trailing P/E", f"{metrics['pe_ratio']}")
+        c4.metric("52-Week High", f"{metrics['currency']} {metrics['52w_high']:,.2f}")
+        c5.metric("52-Week Low", f"{metrics['currency']} {metrics['52w_low']:,.2f}")
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # Workspace Navigation Tabs
-        tab_chart, tab_ai, tab_financials, tab_profile = st.tabs([
-            "📈 Interactive Chart & Volume", 
+        # Tabbed Workspace
+        tab_ai, tab_chart, tab_financials, tab_profile = st.tabs([
             "🧠 AI Research Memo", 
+            "📈 Price Action & Volume", 
             "📊 Financial Statements", 
             "🏢 Company Profile"
         ])
 
-        # TAB 1: Advanced Charting
+        # TAB 1: AI Institutional Research
+        with tab_ai:
+            st.subheader("Search-Grounded Equity Research Thesis")
+            with st.status("Gathering real-time market grounding and building thesis...", expanded=True) as status:
+                ai_memo = generate_institutional_report(ticker_input, metrics)
+                status.update(label="Research Synthesis Complete", state="complete", expanded=False)
+            
+            st.markdown(ai_memo)
+
+        # TAB 2: Advanced Charting
         with tab_chart:
             fig = make_subplots(
                 rows=2, cols=1, 
@@ -223,20 +249,22 @@ if run_button:
                 row_heights=[0.75, 0.25]
             )
             
+            # Candlestick
             fig.add_trace(go.Candlestick(
-                x=hist.index,
-                open=hist['Open'],
-                high=hist['High'],
-                low=hist['Low'],
-                close=hist['Close'],
-                name="OHLC"
+                x=hist.index, open=hist['Open'], high=hist['High'],
+                low=hist['Low'], close=hist['Close'], name="OHLC"
             ), row=1, col=1)
             
+            # Moving Averages
+            hist['SMA_20'] = hist['Close'].rolling(window=20).mean()
+            hist['SMA_50'] = hist['Close'].rolling(window=50).mean()
+            
+            fig.add_trace(go.Scatter(x=hist.index, y=hist['SMA_20'], name="20 SMA", line=dict(color='#00E5FF', width=1)), row=1, col=1)
+            fig.add_trace(go.Scatter(x=hist.index, y=hist['SMA_50'], name="50 SMA", line=dict(color='#FFD700', width=1)), row=1, col=1)
+
+            # Volume
             fig.add_trace(go.Bar(
-                x=hist.index,
-                y=hist['Volume'],
-                name="Volume",
-                marker_color='#232936'
+                x=hist.index, y=hist['Volume'], name="Volume", marker_color='#232936'
             ), row=2, col=1)
 
             fig.update_layout(
@@ -249,18 +277,9 @@ if run_button:
             )
             st.plotly_chart(fig, use_container_width=True)
 
-        # TAB 2: AI Institutional Research Memo
-        with tab_ai:
-            st.subheader("Search-Grounded Equity Research Thesis")
-            with st.status("Gathering live market grounding and executing analysis...", expanded=True) as status:
-                ai_memo = generate_institutional_report(ticker_input, info)
-                status.update(label="Research Synthesis Complete", state="complete", expanded=False)
-            
-            st.markdown(ai_memo)
-
         # TAB 3: Financial Statements
         with tab_financials:
-            st.subheader("Exchange Financial Statements")
+            st.subheader("Statement Metrics")
             f_option = st.radio("Statement Type", ["Income Statement", "Balance Sheet", "Cash Flow"], horizontal=True)
             
             if f_option == "Income Statement" and not financials["income"].empty:
@@ -270,21 +289,14 @@ if run_button:
             elif f_option == "Cash Flow" and not financials["cashflow"].empty:
                 st.dataframe(financials["cashflow"], use_container_width=True)
             else:
-                st.info("Financial statement metrics unavailable for this ticker.")
+                st.info("Financial statements are currently unavailable for this ticker from exchange feeds.")
 
-        # TAB 4: Profile
+        # TAB 4: Business Summary
         with tab_profile:
-            st.subheader("Business Summary")
-            st.write(info.get('longBusinessSummary', 'No summary available.'))
-            
-            st.markdown("---")
-            st.subheader("Key Corporate Metrics")
-            p1, p2, p3 = st.columns(3)
-            p1.write(f"**Profit Margin:** {info.get('profitMargins', 'N/A')}")
-            p2.write(f"**Return on Equity:** {info.get('returnOnEquity', 'N/A')}")
-            p3.write(f"**Debt to Equity:** {info.get('debtToEquity', 'N/A')}")
+            st.subheader("Corporate Overview")
+            st.write(metrics['summary'])
 
     else:
-        st.error(f"Unable to retrieve market data for '{ticker_input}'. Please verify symbol syntax (e.g., use `.NS` suffix for NSE India stocks).")
+        st.error(f"Could not retrieve exchange data for '{ticker_input}'. Verify ticker syntax (e.g., `.NS` for NSE stocks).")
 else:
-    st.info("Enter a ticker symbol in the sidebar and select **EXECUTE RESEARCH PIPELINE**.")
+    st.info("Enter a stock symbol in the left panel and click **EXECUTE RESEARCH PIPELINE**.")
